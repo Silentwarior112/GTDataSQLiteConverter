@@ -54,7 +54,14 @@ namespace GTDataSQLiteConverter
 
             var database = new CarDataBase();
             database.InitSubDatabases(exportVerbs.InputPath, pmstrPath, unistrPath);
-            database.InitIDTables(idxPath, idstrPath);
+            if (File.Exists(idxPath))
+            {
+                database.InitIDTables(idxPath, idstrPath);
+            }
+            else
+            {
+                Console.WriteLine("NOTE: ID files don't exist.");
+            }
 
             string outPath;
             if (exportVerbs.OutputPath is not null)

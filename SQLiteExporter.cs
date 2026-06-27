@@ -33,28 +33,41 @@ namespace GTDataSQLiteConverter
 
             MakeTableInfo();
 
+            bool hasErrors = false;
             for (int i = 0; i < _database.GetNumElements(); i++)
             {
                 CarDatabaseFileType type = (CarDatabaseFileType)i;
                 var table = _database.GetFile(i);
                 string tableName = type.ToString();
 
-                string headersFile = TableMappingReader.GetHeadersFile(tableName);
-                if (string.IsNullOrEmpty(headersFile))
+                try
                 {
-                    Console.WriteLine($"Skipped '{tableName}': unmapped.");
+                    string headersFile = TableMappingReader.GetHeadersFile(tableName);
+                    if (string.IsNullOrEmpty(headersFile))
+                    {
+                        Console.WriteLine($"Skipped '{tableName}': unmapped.");
+                        continue;
+                    }
+
+                    Console.WriteLine($"Reading '{tableName}'.");
+                    var columnMappings = TableMappingReader.ReadColumnMappings(headersFile, out int readSize);
+                    if (table.ElementSize != readSize)
+                        Console.WriteLine($"WARNING: '{tableName}' non-matching mapped size");
+
+                    var rows = ReadRows(table, columnMappings, 0);
+
+                    ExportTableToSQLite(tableName, columnMappings, rows);
+                }
+                catch (Exception e)
+                {
+                    hasErrors = true;
+                    Console.WriteLine($"ERROR: on '{tableName}': {e}");
                     continue;
                 }
-
-                Console.WriteLine($"Reading '{tableName}'.");
-                var columnMappings = TableMappingReader.ReadColumnMappings(headersFile, out int readSize);
-                if (table.ElementSize != readSize)
-                    Console.WriteLine($"WARNING: '{tableName}' non-matching mapped size");
-
-                var rows = ReadRows(table, columnMappings, 0);
-
-                ExportTableToSQLite(tableName, columnMappings, rows);
             }
+
+            if (hasErrors)
+                Console.WriteLine($">>> WARNING: Some tables were not converted.");
 
             _con.Close();
             _con.Dispose();
@@ -101,11 +114,16 @@ namespace GTDataSQLiteConverter
                             {
                                 ulong hash = sr.ReadUInt64();
                                 if (hash == 0)
+                                {
                                     row.Cells.Add(null);
+                                }
                                 else
                                 {
                                     string str = _database.GetIDString(hash);
-                                    row.Cells.Add(str);
+                                    if (str is null)
+                                        row.Cells.Add($"_{hash:X16}");
+                                    else
+                                        row.Cells.Add(str);
                                 }
                             }
                             break;

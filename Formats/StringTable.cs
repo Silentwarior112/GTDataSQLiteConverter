@@ -32,6 +32,11 @@ namespace GTDataSQLiteConverter
                 Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
                 encoding = Encoding.GetEncoding("euc-jp");
             }
+            else if (BytesPerCharacter == 2)
+            {
+                Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+                encoding = Encoding.GetEncoding("utf-16");
+            }
             else if (BytesPerCharacter != 0x0001)
             {
                 throw new InvalidDataException("STDB contains unknown string encoding type.");
