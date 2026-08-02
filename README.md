@@ -1,6 +1,4 @@
-# GTDataSQLiteConverter
-
-Currently GT3 & export to SQLite only.
+# GTDataSQLiteConverter.
 
 Two programs share the table layouts in `Headers/`:
 
