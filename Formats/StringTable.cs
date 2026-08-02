@@ -13,8 +13,8 @@ namespace GTDataSQLiteConverter
 
         public void Read(string filename)
         {
-            var fs = new FileStream(filename, FileMode.Open);
-            var bs = new BinaryStream(fs);
+            using var fs = new FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var bs = new BinaryStream(fs);
 
             var magic = bs.ReadUInt32();
             if (magic != ExpectedMagic)

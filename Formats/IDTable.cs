@@ -14,10 +14,16 @@ namespace GTDataSQLiteConverter.Formats
         public const uint ExpectedMagic = 0x42444449;
 
         private readonly SortedDictionary<ulong, long> IDs = new();
+
+        /// <summary>
+        /// Hash -> index into the ID string database, sorted by hash (the game binary-searches this).
+        /// </summary>
+        public IReadOnlyDictionary<ulong, long> Entries => IDs;
+
         public void Read(string indexfn)
         {
-            var fs = new FileStream(indexfn, FileMode.Open);
-            var bs = new BinaryStream(fs);
+            using var fs = new FileStream(indexfn, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var bs = new BinaryStream(fs);
 
             var magic = bs.ReadUInt32();
             if (magic != ExpectedMagic)

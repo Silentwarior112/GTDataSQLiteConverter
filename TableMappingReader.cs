@@ -19,24 +19,28 @@ namespace GTDataSQLiteConverter
             return columns;
         }
 
+        /// <summary>
+        /// Directory the .headers files are looked up in. Relative paths are resolved against the
+        /// working directory first, then against the directory the assembly was loaded from.
+        /// </summary>
+        public static string HeadersDirectory { get; set; } = "Headers";
+
         public static string? GetHeadersFile(string tableName, bool checkSize = false)
         {
-            string headersFilename = Path.Combine("Headers", Path.ChangeExtension(tableName, ".headers"));
-            if (File.Exists(headersFilename))
+            string fileName = Path.ChangeExtension(tableName, ".headers");
+
+            foreach (string dir in new[] { HeadersDirectory, Path.Combine(AppContext.BaseDirectory, "Headers") })
             {
-                if (checkSize)
-                {
-                    using var fs = new FileStream(headersFilename, FileMode.Open);
-                    if (fs.Length > 0)
-                    {
-                        return headersFilename;
-                    }
-                }
-                else
-                {
-                    return headersFilename;
-                }
+                string headersFilename = Path.Combine(dir, fileName);
+                if (!File.Exists(headersFilename))
+                    continue;
+
+                if (checkSize && new FileInfo(headersFilename).Length == 0)
+                    continue;
+
+                return headersFilename;
             }
+
             return null;
         }
 
