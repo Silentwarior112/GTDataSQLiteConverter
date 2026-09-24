@@ -1,14 +1,17 @@
 # GT ParamDB Editor
 
-A GUI editor for Gran Turismo 3 ParamDB files. It opens the game's database as a live SQLite
-database you can edit in a grid, and writes the game files back out every time you save.
+A GUI editor for Gran Turismo 3 and [Gran Turismo Concept](#gt-concept) ParamDB files. It opens the
+game's database as a live SQLite database you can edit in a grid, and writes the game files back out
+every time you save.
 
 Where `GTDataSQLiteConverter` is a two-step CLI (export to SQLite, edit it yourself, import back),
 this keeps the SQLite database open behind the window, so there is no export/import cycle to run.
+Both run on the same engine, so everything below holds for the CLI too.
 
 ## Using it
 
-1. **File > Open** and pick `paramdb.db` (or `paramdb_us.db` / `paramdb_eu.db`).
+1. **File > Open** and pick `paramdb.db` (or `paramdb_us.db` / `paramdb_eu.db`, or a GT Concept one
+   such as `paramdb_kr.db`). The status bar shows which game it was recognised as.
    The companion files - `paramstr`, `paramunistr`, `.id_db_idx`, `.id_db_str` - are found next to it
    by name. `paramstr` and `paramunistr` must be present; without the `.id_db_*` pair, row labels
    show as raw hashes instead of names.
@@ -32,6 +35,7 @@ Also available:
 
 - **Add / Duplicate / Delete row** - Ctrl+N, Ctrl+D, Ctrl+Delete, or the right-click menu.
   New rows get a unique placeholder label, which you should rename to something meaningful.
+- **Add / Remove column** - Edit menu or right-click; see [Adding and removing columns](#adding-and-removing-columns).
 - **Filter rows** - the box above the grid does a substring match across every column.
 - **Tools > SQL query** (Ctrl+Q) - run SQL against the live database. Good for bulk edits:
   `UPDATE CAR SET Price = Price / 2 WHERE Year < 1990;`
@@ -44,18 +48,54 @@ Also available:
 ## What it does to your files
 
 Saving replaces `paramdb`, `paramstr`, `paramunistr`, `.id_db_idx` and `.id_db_str` for the region
-you opened. The first save copies each original to `<name>.bak` and leaves that copy alone
-afterwards, so the `.bak` files are always the untouched originals. Turn this off under
-**Tools > Back up game files on first save**.
+you opened, plus a layout file under `Headers/Custom` if columns were added or removed (see
+[below](#adding-and-removing-columns)). The first save copies each original to `<name>.bak` and
+leaves that copy alone afterwards, so the `.bak` files are always the untouched originals. Turn this
+off under **Tools > Back up game files on first save**.
 
 Every file is built and checked in memory before anything on disk is touched. If a value does not
 fit the format - 9999 in a byte column, text a Japanese column cannot encode - the save stops, lists
 what is wrong, and leaves the game folder exactly as it was.
 
+## Adding and removing columns
+
+Rows can hold any number of columns, so a table can be given fields the retail game never had - the
+GT Concept ones, say, or anything else a modified executable reads.
+
+**Edit > Add column...** asks for a name, a type and an offset. The offset starts just after the
+last column; type another to use bytes no column covers, like retail padding. If the column does not
+fit in the row, the rows grow - always to a multiple of 8 bytes, like every table in both games. The
+name starts as `Unk0x<offset>` until you type one.
+
+A new column shows what its bytes already hold, so a column laid over existing bytes changes nothing
+by itself. Bytes the rows gain start as zero, and text columns in them start empty.
+
+**Edit > Remove column** removes the column under the cursor (or the one whose header you
+right-clicked). If it was the last thing in the row, the rows shrink and what it held is gone.
+Otherwise its bytes stay in every row as the file has them, so the columns after it keep their
+offsets. The label column cannot be removed. Rows never shrink past bytes that hold data in the file.
+
+Nothing on disk changes until you save. The grid and the SQL window see the new layout at once.
+
+Saving writes the layout to `Headers/Custom/<GT3|GTC>/<TABLE>.headers`. That file is used for any
+paramdb whose rows in that table are exactly the size it describes. So a file you widened opens with
+its new columns, and an untouched retail file keeps the retail layout: opening it leaves a note that
+the saved layout was not used. To widen another region's file the same way, add the same columns to
+it. A saved layout with the same row size as the stock one (one that only names padding) applies to
+every file of that game.
+
+A layout saved after removing columns back to stock writes nothing and leaves the saved file in place,
+for other files that still use it. Delete a file under `Headers/Custom` to stop using it. The layout
+also travels in SQLite exports, so reopening one does not depend on the file.
+
+The CLI's `add-column` and `remove-column` verbs do the same to a SQLite export, and its `import`
+saves the layout the same way.
+
 ## Fidelity
 
 Opening a ParamDB and saving it with no edits reproduces all five files byte for byte, for all three
-regions of retail GT3. That is checked against the real game files, along with:
+regions of retail GT3 and for GT Concept's `paramdb_kr.db`. That is checked against the real game
+files, along with:
 
 - the label hash function, against all 20,714 entries of the ID table
 - edits, insertions and deletions surviving a save and reload
@@ -64,6 +104,10 @@ regions of retail GT3. That is checked against the real game files, along with:
 - out-of-range values being refused before anything is written
 - all ordered table-to-table transitions in the window, driven through the real grid
 - `carcolor.db` and `carcolor.sdb`, byte for byte, including through a full SQLite round trip
+- edits to GT Concept's extra columns changing exactly the bytes they map, and a GT Concept database
+  reopened from its SQLite export keeping GT Concept's layouts
+- a column added to retail GEAR widening only that table, the widened file reopening with it, and
+  removing it again giving back retail byte for byte
 
 A few details this relies on, all confirmed against retail files:
 
@@ -113,8 +157,44 @@ offsets a file was read with are kept while they still tile the pool. Once colou
 they no longer do, and the pool is laid out afresh - still valid, but no longer byte-identical to
 retail. That is expected.
 
+## GT Concept
+
+GT Concept uses GT3's archive format and the same 36 tables, so the editor tells the two apart by
+layout: whichever game's `.headers` files match the most blocks' row sizes wins. The differences:
+
+- Tables 30-35 come in a different order - ENEMY_CARS, EVENT, REGULATIONS, COURSE, ARCADE_CAR, CAR -
+  so CAR is table 35 rather than 30.
+- Some rows hold fields retail GT3 does not have. What they mean is not known yet, so they are named
+  after their offset:
+
+  | Table        | Row size    | GT Concept-only fields                                   |
+  |--------------|-------------|----------------------------------------------------------|
+  | CHASSIS      | 0x20 → 0x28 | `Unk0x20`, `Unk0x22`, `Unk0x24` (ushort)                 |
+  | ENGINE       | 0x58 → 0x60 | `Unk0x58` (byte)                                         |
+  | GEAR         | 0x30 → 0x38 | `Unk0x30` (byte)                                         |
+  | DRIVETRAIN   | 0x28        | `Unk0x22` (byte) - padding in retail                     |
+  | RACINGMODIFY | 0x48        | `Unk0x41` (byte), `Unk0x42` (ushort) - padding in retail |
+
+- The end of an EVENT row follows GT Concept's own getters, which do not match the retail layout:
+  `TwGoodTireWear` and `TwGoodTireGripDown` are separate bytes, `LaunchPoint` is a ushort,
+  `NeedDrivetrain` is a byte, and `LightEffect` is the byte after it, at `+0x1F7`.
+
+These layouts live in `Headers/GTC/`. A table with no file there uses the shared one in `Headers/`,
+and includes resolve the same way - so renaming an `Unk` column means editing one small file.
+
+Not covered: some GT Concept files are stored gzip-compressed (they start with `1F 8B`), including
+the `carcolor.db` that sits beside `paramdb_kr.db`. Those are not read; decompress them first.
+`paramdb_kr.db` and its companion files are not compressed.
+
 ## Building
 
 ```
 dotnet build GTParamDBEditor -c Release
 ```
+
+The engine - reading and writing the game files, and their SQLite form - is the parent project's
+`ParamDb/`, shared with the CLI. Only the window, and the session it keeps open, live here.
+
+Table layouts come from the `.headers` files in the parent project (GT Concept's own in
+`Headers/GTC/`), which are copied next to the executable. Editing those changes what the editor shows
+without a rebuild.

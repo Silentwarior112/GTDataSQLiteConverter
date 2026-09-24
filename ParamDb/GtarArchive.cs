@@ -1,13 +1,11 @@
-using GTDataSQLiteConverter;
-
 using Syroot.BinaryData;
 
-namespace GTParamDBEditor.Core;
+namespace GTDataSQLiteConverter.ParamDb;
 
 /// <summary>
-/// The "GTAR" container that paramdb.db is. Unlike the CLI converter's writer this preserves the
-/// alignment mask and the end-of-data index convention found in the source file, so a load/save
-/// round trip with no edits reproduces the original bytes.
+/// The "GTAR" container that paramdb.db is. It preserves the alignment mask and the end-of-data
+/// index convention found in the source file, so a load/save round trip with no edits reproduces
+/// the original bytes.
 /// </summary>
 public sealed class GtarArchive
 {

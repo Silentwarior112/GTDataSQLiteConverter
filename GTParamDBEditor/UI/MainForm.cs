@@ -5,6 +5,7 @@ using System.Media;
 using System.Text;
 
 using GTDataSQLiteConverter.Entities;
+using GTDataSQLiteConverter.ParamDb;
 
 using GTParamDBEditor.Core;
 
@@ -19,6 +20,9 @@ public sealed class MainForm : Form
     private DataTable? _currentData;
     private SqlQueryForm? _sqlForm;
     private bool _suppressTableChange;
+
+    /// <summary>The column last right-clicked, so the context menu can act on a header's column.</summary>
+    private LiveColumn? _rightClickedColumn;
 
     private readonly BindingSource _binding = new();
 
@@ -45,6 +49,10 @@ public sealed class MainForm : Form
     private readonly ToolStripMenuItem _addRowItem = new("&Add row") { ShortcutKeys = Keys.Control | Keys.N };
     private readonly ToolStripMenuItem _duplicateRowItem = new("&Duplicate row") { ShortcutKeys = Keys.Control | Keys.D };
     private readonly ToolStripMenuItem _deleteRowItem = new("De&lete rows") { ShortcutKeys = Keys.Control | Keys.Delete };
+    private readonly ToolStripMenuItem _addColumnItem = new("Add &column...");
+    private readonly ToolStripMenuItem _removeColumnItem = new("Re&move column");
+    private readonly ToolStripMenuItem _contextAddColumn = new("Add column...");
+    private readonly ToolStripMenuItem _contextRemoveColumn = new("Remove column");
     private readonly ToolStripMenuItem _sqlItem = new("SQL &query...") { ShortcutKeys = Keys.Control | Keys.Q };
     private readonly ToolStripMenuItem _warningsItem = new("Show load &warnings...");
     private readonly ToolStripMenuItem _backupItem = new("Back up game files on first save") { CheckOnClick = true, Checked = true };
@@ -124,7 +132,11 @@ public sealed class MainForm : Form
         _grid.DataError += OnGridDataError;
         _grid.CellFormatting += OnGridCellFormatting;
         _grid.DataBindingComplete += (_, _) => UpdateRowStatus();
-        _grid.CurrentCellChanged += (_, _) => UpdateRowStatus();
+        _grid.CurrentCellChanged += (_, _) =>
+        {
+            UpdateRowStatus();
+            UpdateColumnCommands();
+        };
         _grid.UserDeletedRow += (_, _) => MarkDirty();
         _grid.CellValueChanged += (_, _) => MarkDirty();
 
@@ -187,9 +199,15 @@ public sealed class MainForm : Form
         _addRowItem.Click += (_, _) => AddRow();
         _duplicateRowItem.Click += (_, _) => DuplicateRow();
         _deleteRowItem.Click += (_, _) => DeleteSelectedRows();
+        _addColumnItem.Click += (_, _) => AddColumn();
+        _removeColumnItem.Click += (_, _) => RemoveColumn(CurrentColumn());
 
         var edit = new ToolStripMenuItem("&Edit");
-        edit.DropDownItems.AddRange(new ToolStripItem[] { _addRowItem, _duplicateRowItem, _deleteRowItem });
+        edit.DropDownItems.AddRange(new ToolStripItem[]
+        {
+            _addRowItem, _duplicateRowItem, _deleteRowItem, new ToolStripSeparator(),
+            _addColumnItem, _removeColumnItem,
+        });
 
         _sqlItem.Click += (_, _) => ShowSqlQuery();
         _warningsItem.Click += (_, _) => ShowWarnings();
@@ -239,7 +257,33 @@ public sealed class MainForm : Form
         menu.Items.Add("Duplicate row", null, (_, _) => DuplicateRow());
         menu.Items.Add("Delete rows", null, (_, _) => DeleteSelectedRows());
         menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(_contextAddColumn);
+        menu.Items.Add(_contextRemoveColumn);
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Copy cell", null, (_, _) => CopyCell());
+
+        _contextAddColumn.Click += (_, _) => AddColumn();
+        _contextRemoveColumn.Click += (_, _) => RemoveColumn(_contextRemoveColumn.Tag as LiveColumn);
+
+        // Right-clicking a column header aims Remove column at that column, not the current cell's.
+        _grid.CellMouseDown += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Right)
+                _rightClickedColumn = e.ColumnIndex >= 0 ? _grid.Columns[e.ColumnIndex].Tag as LiveColumn : null;
+        };
+
+        menu.Opening += (_, _) =>
+        {
+            LiveColumn? target = _rightClickedColumn ?? CurrentColumn();
+            _rightClickedColumn = null;
+
+            bool layout = _currentTable is { IsMapped: true, CanEditLayout: true };
+            _contextAddColumn.Enabled = layout;
+            _contextRemoveColumn.Tag = target;
+            _contextRemoveColumn.Text = target is null ? "Remove column" : $"Remove column {target.Name}";
+            _contextRemoveColumn.Enabled = layout && target is not null && _currentTable!.CanRemove(target);
+        };
+
         _grid.ContextMenuStrip = menu;
     }
 
@@ -432,6 +476,13 @@ public sealed class MainForm : Form
                 {
                     item.ForeColor = SystemColors.GrayText;
                     item.ToolTipText = "No .headers mapping - kept byte for byte, not editable.";
+                }
+                else if (table.IsArchiveTable && table.SourceRowCount > 0 && table.RowStride != table.SourceElementSize)
+                {
+                    item.ForeColor = Color.FromArgb(150, 90, 0);
+                    item.ToolTipText =
+                        $"Rows {(table.RowStride > table.SourceElementSize ? "grow" : "shrink")} from " +
+                        $"{table.SourceElementSize} to {table.RowStride} bytes when saved.";
                 }
                 else if (table.HasSizeMismatch)
                 {
@@ -764,6 +815,86 @@ public sealed class MainForm : Form
             Clipboard.Clear();
     }
 
+    private LiveColumn? CurrentColumn() => _grid.CurrentCell?.OwningColumn?.Tag as LiveColumn;
+
+    private void AddColumn()
+    {
+        if (_session is null || _currentTable is not { IsMapped: true, CanEditLayout: true } table || !FlushPendingEdits())
+            return;
+
+        using var dialog = new AddColumnDialog(table);
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+            return;
+
+        int rowSize = table.RowStride;
+        try
+        {
+            _session.Database.AddColumn(table, dialog.ColumnName, dialog.ColumnType, dialog.ColumnOffset);
+        }
+        catch (Exception e) when (e is Microsoft.Data.Sqlite.SqliteException or InvalidOperationException)
+        {
+            MessageBox.Show(this, e.Message, "Could not add the column", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        AfterLayoutChange(table, $"Added {dialog.ColumnName} to {table.Name}.", rowSize, dialog.ColumnName);
+    }
+
+    private void RemoveColumn(LiveColumn? column)
+    {
+        if (_session is null || column is null || _currentTable is not { IsMapped: true, CanEditLayout: true } table)
+            return;
+
+        if (!table.CanRemove(column))
+        {
+            MessageBox.Show(this, $"{column.Name} is the label every row is found by, so it cannot be removed.",
+                AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        if (!FlushPendingEdits())
+            return;
+
+        int rowSize = table.RowStride;
+        int after = table.RowSizeWithout(column);
+        string effect = after < rowSize
+            ? $"Rows shrink from {rowSize} to {after} bytes when you save, and what the column holds is lost."
+            : (column.Size == 1 ? $"Its byte at 0x{column.Offset:X} stays" : $"Its {column.Size} bytes at 0x{column.Offset:X} stay") +
+              " in every row as the file has them, so the columns after it keep their offsets.";
+
+        if (MessageBox.Show(this, $"Remove {column.Name} from {table.Name}?\n\n{effect}", AppName,
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            return;
+
+        try
+        {
+            _session.Database.RemoveColumn(table, column);
+        }
+        catch (Exception e) when (e is Microsoft.Data.Sqlite.SqliteException or InvalidOperationException)
+        {
+            MessageBox.Show(this, e.Message, "Could not remove the column", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        AfterLayoutChange(table, $"Removed {column.Name} from {table.Name}.", rowSize);
+    }
+
+    /// <summary>Shows a table again after its columns changed, and says what that does to its rows.</summary>
+    private void AfterLayoutChange(LiveTable table, string message, int rowSizeBefore, string? focusColumn = null)
+    {
+        MarkDirty();
+        PopulateTableList();
+        ShowTable(table);
+
+        if (table.RowStride != rowSizeBefore)
+            message += $" Rows {(table.RowStride > rowSizeBefore ? "grow" : "shrink")} from {rowSizeBefore} to {table.RowStride} bytes when you save.";
+
+        _statusSpring.Text = message;
+
+        if (focusColumn is not null && _grid.Columns[focusColumn] is { } column && _grid.RowCount > 0)
+            _grid.CurrentCell = _grid.Rows[0].Cells[column.Index];
+    }
+
     private void ApplyRowFilter()
     {
         if (_currentData is null)
@@ -922,6 +1053,9 @@ public sealed class MainForm : Form
         if (report.Backups.Count > 0)
             summary.Append(" (").Append(report.Backups.Count).Append(" backup(s) created)");
 
+        if (report.LayoutFiles.Count > 0)
+            summary.Append("; column layout saved to ").Append(string.Join(", ", report.LayoutFiles));
+
         _statusSpring.Text = summary.ToString();
 
         if (report.Warnings.Count > 0)
@@ -1016,8 +1150,8 @@ public sealed class MainForm : Form
         MessageBox.Show(
             this,
             $"{AppName}\n\n" +
-            "Opens a Gran Turismo 3 ParamDB as a live SQLite database, lets you edit it, and writes\n" +
-            "the game files back out when you save.\n\n",
+            "Opens a Gran Turismo 3 or Gran Turismo Concept ParamDB as a live SQLite database, lets\n" +
+            "you edit it, and writes the game files back out when you save.\n\n",
             $"About {AppName}",
             MessageBoxButtons.OK,
             MessageBoxIcon.Information);
@@ -1041,7 +1175,7 @@ public sealed class MainForm : Form
         string dirty = _session?.IsDirty == true ? " *" : "";
         Text = _session is null ? AppName : $"{Path.GetFileName(_session.DisplayPath)}{dirty} - {AppName}";
 
-        _statusFile.Text = _session is null ? "No file open" : _session.DisplayPath;
+        _statusFile.Text = _session is null ? "No file open" : $"{_session.DisplayPath}  ({_session.Database.Game.DisplayName})";
         _statusDirty.Text = _session is null ? "" : _session.IsDirty ? "Unsaved changes" : "Saved";
         _statusDirty.ForeColor = _session?.IsDirty == true ? Color.FromArgb(160, 60, 0) : SystemColors.ControlText;
 
@@ -1070,6 +1204,16 @@ public sealed class MainForm : Form
 
         _grid.ReadOnly = !editable;
         _rowFilter.Enabled = editable;
+
+        UpdateColumnCommands();
+    }
+
+    private void UpdateColumnCommands()
+    {
+        bool layout = _session is not null && _currentTable is { IsMapped: true, CanEditLayout: true };
+
+        _addColumnItem.Enabled = layout;
+        _removeColumnItem.Enabled = layout && CurrentColumn() is { } column && _currentTable!.CanRemove(column);
     }
 
     private void UpdateRowStatus()

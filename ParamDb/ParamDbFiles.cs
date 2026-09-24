@@ -1,6 +1,6 @@
 using GTDataSQLiteConverter.Formats;
 
-namespace GTParamDBEditor.Core;
+namespace GTDataSQLiteConverter.ParamDb;
 
 /// <summary>
 /// A ParamDB as it exists on disk: the table archive plus the string and ID side tables it points into.

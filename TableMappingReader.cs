@@ -10,10 +10,10 @@ namespace GTDataSQLiteConverter
 {
     public class TableMappingReader
     {
-        public static List<TableColumn> ReadColumnMappings(string tableName, out int readSize)
+        public static List<TableColumn> ReadColumnMappings(string tableName, out int readSize, string? variant = null)
         {
             int offset = 0;
-            List<TableColumn> columns = IterativeHeadersReader(tableName, ref offset);
+            List<TableColumn> columns = IterativeHeadersReader(tableName, ref offset, variant);
 
             readSize = offset;
             return columns;
@@ -25,13 +25,23 @@ namespace GTDataSQLiteConverter
         /// </summary>
         public static string HeadersDirectory { get; set; } = "Headers";
 
-        public static string? GetHeadersFile(string tableName, bool checkSize = false)
+        /// <summary>
+        /// A variant is a subdirectory holding another game's layouts (e.g. "GTC"). Tables it has no
+        /// file for, and anything its files include, fall back to the shared files.
+        /// </summary>
+        public static string? GetHeadersFile(string tableName, bool checkSize = false, string? variant = null)
         {
             string fileName = Path.ChangeExtension(tableName, ".headers");
+            string[] dirs = { HeadersDirectory, Path.Combine(AppContext.BaseDirectory, "Headers") };
 
-            foreach (string dir in new[] { HeadersDirectory, Path.Combine(AppContext.BaseDirectory, "Headers") })
+            // Every variant file wins over every shared one, so an older Headers folder in the working
+            // directory cannot hide a layout that only exists for the variant.
+            IEnumerable<string> candidates = dirs.Select(dir => Path.Combine(dir, fileName));
+            if (!string.IsNullOrEmpty(variant))
+                candidates = dirs.Select(dir => Path.Combine(dir, variant, fileName)).Concat(candidates);
+
+            foreach (string headersFilename in candidates)
             {
-                string headersFilename = Path.Combine(dir, fileName);
                 if (!File.Exists(headersFilename))
                     continue;
 
@@ -44,7 +54,7 @@ namespace GTDataSQLiteConverter
             return null;
         }
 
-        private static List<TableColumn> IterativeHeadersReader(string filename, ref int offset)
+        private static List<TableColumn> IterativeHeadersReader(string filename, ref int offset, string? variant)
         {
             using var sr = new StreamReader(filename);
 
@@ -107,14 +117,14 @@ namespace GTDataSQLiteConverter
                         Console.WriteLine($"Metadata error: {debugln} has malformed 'include' - expected 1 argument (filename), may break!");
 
 
-                    var headersFilename = GetHeadersFile($"{split[1]}.headers");
+                    var headersFilename = GetHeadersFile($"{split[1]}.headers", variant: variant);
                     if (headersFilename == null)
                     {
                         Console.WriteLine($"Metadata error: unknown include file '{split[1]}.headers' - may break!");
                         continue;
                     }
 
-                    columns.AddRange(IterativeHeadersReader(headersFilename, ref offset));
+                    columns.AddRange(IterativeHeadersReader(headersFilename, ref offset, variant));
 
                 }
             }

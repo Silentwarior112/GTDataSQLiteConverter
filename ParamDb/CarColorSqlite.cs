@@ -4,7 +4,7 @@ using GTDataSQLiteConverter.Entities;
 
 using Microsoft.Data.Sqlite;
 
-namespace GTParamDBEditor.Core;
+namespace GTDataSQLiteConverter.ParamDb;
 
 /// <summary>
 /// Presents carcolor.db as two ordinary editable tables, and turns them back into the file.

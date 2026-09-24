@@ -2,7 +2,7 @@ using System.Buffers.Binary;
 
 using Syroot.BinaryData;
 
-namespace GTParamDBEditor.Core;
+namespace GTDataSQLiteConverter.ParamDb;
 
 /// <summary>
 /// One entry of the shared colour palette.

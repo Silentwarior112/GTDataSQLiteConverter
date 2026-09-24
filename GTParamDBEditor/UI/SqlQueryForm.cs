@@ -1,7 +1,7 @@
 using System.ComponentModel;
 using System.Data;
 
-using GTParamDBEditor.Core;
+using GTDataSQLiteConverter.ParamDb;
 
 using Microsoft.Data.Sqlite;
 

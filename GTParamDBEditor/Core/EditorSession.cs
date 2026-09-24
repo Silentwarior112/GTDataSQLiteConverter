@@ -1,3 +1,5 @@
+using GTDataSQLiteConverter.ParamDb;
+
 namespace GTParamDBEditor.Core;
 
 /// <summary>One open database: the live SQLite plus where saving should put the game files.</summary>

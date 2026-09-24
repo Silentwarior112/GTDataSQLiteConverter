@@ -1,4 +1,6 @@
-namespace GTParamDBEditor.Core;
+using System.Diagnostics.CodeAnalysis;
+
+namespace GTDataSQLiteConverter.ParamDb;
 
 /// <summary>
 /// The set of game files that together make up one region variant of a ParamDB.
@@ -13,10 +15,17 @@ public sealed class ParamDbPaths
     /// <summary>The paramdb file actually selected by the user (may be named unconventionally).</summary>
     public string ParamDb { get; }
 
-    public string ParamStr => Named("paramstr");
-    public string ParamUniStr => Named("paramunistr");
-    public string IdIndex => Named(".id_db_idx");
-    public string IdStrings => Named(".id_db_str");
+    // Companion files follow the suffix unless pointed somewhere else (the CLI's --pstr and friends).
+    private readonly string? _paramStr;
+    private readonly string? _paramUniStr;
+    private readonly string? _idIndex;
+    private readonly string? _idStrings;
+    private readonly string? _carColorSdb;
+
+    [AllowNull] public string ParamStr { get => _paramStr ?? Named("paramstr"); init => _paramStr = value; }
+    [AllowNull] public string ParamUniStr { get => _paramUniStr ?? Named("paramunistr"); init => _paramUniStr = value; }
+    [AllowNull] public string IdIndex { get => _idIndex ?? Named(".id_db_idx"); init => _idIndex = value; }
+    [AllowNull] public string IdStrings { get => _idStrings ?? Named(".id_db_str"); init => _idStrings = value; }
 
     /// <summary>The name paramdb would have when written back out with this suffix.</summary>
     public string ParamDbOut => Named("paramdb");
@@ -27,7 +36,7 @@ public sealed class ParamDbPaths
     /// </summary>
     public string CarColorDb => Path.Combine(DirectoryPath, "carcolor.db");
 
-    public string CarColorSdb => Path.Combine(DirectoryPath, "carcolor.sdb");
+    [AllowNull] public string CarColorSdb { get => _carColorSdb ?? Path.Combine(DirectoryPath, "carcolor.sdb"); init => _carColorSdb = value; }
 
     public bool HasCarColors => File.Exists(CarColorDb) && File.Exists(CarColorSdb);
 
@@ -42,8 +51,8 @@ public sealed class ParamDbPaths
         => Path.Combine(DirectoryPath, string.IsNullOrEmpty(Suffix) ? $"{stem}.db" : $"{stem}_{Suffix}.db");
 
     /// <summary>
-    /// Derives the companion file names from a selected paramdb file, matching the CLI converter's
-    /// convention (paramdb_eu.db -> paramstr_eu.db, .id_db_idx_eu.db, ...).
+    /// Derives the companion file names from a selected paramdb file
+    /// (paramdb_eu.db -> paramstr_eu.db, .id_db_idx_eu.db, ...).
     /// </summary>
     public static ParamDbPaths FromParamDbFile(string paramDbFile)
     {

@@ -1,12 +1,11 @@
 using System.Buffers.Binary;
 
-using GTDataSQLiteConverter;
 using GTDataSQLiteConverter.Entities;
 using GTDataSQLiteConverter.Formats;
 
 using Microsoft.Data.Sqlite;
 
-namespace GTParamDBEditor.Core;
+namespace GTDataSQLiteConverter.ParamDb;
 
 public sealed class SaveReport
 {
@@ -14,6 +13,9 @@ public sealed class SaveReport
     public List<string> Warnings { get; } = new();
     public List<(string File, long Size)> WrittenFiles { get; } = new();
     public List<string> Backups { get; } = new();
+
+    /// <summary>Column layouts written under Headers/Custom.</summary>
+    public List<string> LayoutFiles { get; } = new();
 
     public bool Succeeded => Issues.Count == 0;
 }
@@ -82,7 +84,33 @@ public static class ParamDbWriter
             return report;
 
         Commit(files, createBackups, report);
+        SaveLayouts(live, report);
         return report;
+    }
+
+    /// <summary>
+    /// Saves column layouts that were edited, once the game files are written, so a file with these
+    /// rows opens with these columns next time. A failure here does not undo the game files.
+    /// </summary>
+    private static void SaveLayouts(LiveDatabase live, SaveReport report)
+    {
+        foreach (LiveTable table in live.Tables.Where(t => t.LayoutEdited))
+        {
+            try
+            {
+                (string? file, bool written) = TableLayouts.Save(live.Game, table, report.Warnings);
+                if (written)
+                    report.LayoutFiles.Add(file!);
+
+                live.MarkLayoutSaved(table, file);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                report.Warnings.Add(
+                    $"The game files were written, but the {table.Name} column layout could not be saved ({e.Message}). " +
+                    "Until it is, the file will reopen without the columns added to it.");
+            }
+        }
     }
 
     /// <summary>
@@ -255,7 +283,8 @@ public static class ParamDbWriter
         return duplicates;
     }
 
-    private static Dictionary<ulong, int> BuildTemplateIndex(LiveTable table)
+    /// <summary>Label hash to row index in the block as it was loaded - first row wins for duplicates.</summary>
+    internal static Dictionary<ulong, int> BuildTemplateIndex(LiveTable table)
     {
         var templates = new Dictionary<ulong, int>();
 

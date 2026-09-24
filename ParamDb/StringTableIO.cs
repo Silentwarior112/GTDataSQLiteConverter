@@ -2,7 +2,7 @@ using System.Text;
 
 using Syroot.BinaryData;
 
-namespace GTParamDBEditor.Core;
+namespace GTDataSQLiteConverter.ParamDb;
 
 /// <summary>
 /// Reader/writer for the "STDB" string databases (paramstr / paramunistr / .id_db_str).
@@ -123,7 +123,7 @@ public static class StringTableIO
 
             // Retail paramunistr holds a few byte sequences that are not valid euc-jp, so decoding
             // them is lossy. Strings that came from the file are written back as the exact bytes
-            // that were read; only strings the editor created are encoded from text.
+            // that were read; only strings added since are encoded from text.
             byte[] data = table.GetRawData(i) ?? Encode(strings[i], table.BytesPerCharacter);
 
             // Terminator, then round the entry up to an even length.
@@ -166,7 +166,7 @@ public sealed class StringTable
     public List<string> Strings { get; } = new();
 
     /// <summary>
-    /// The bytes each string was read as, parallel to <see cref="Strings"/>. Entries the editor added
+    /// The bytes each string was read as, parallel to <see cref="Strings"/>. Entries added since
     /// have none and get encoded from their text instead.
     /// </summary>
     public List<byte[]?> RawData { get; } = new();
@@ -176,7 +176,7 @@ public sealed class StringTable
 
 /// <summary>
 /// Interns strings into a <see cref="StringTable"/>, seeded with the table as it was loaded so that
-/// existing indices - including those referenced by table data the editor does not understand -
+/// existing indices - including those referenced by table data no .headers file describes -
 /// keep pointing at the same string.
 /// </summary>
 public sealed class StringPool

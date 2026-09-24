@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Numerics;
 
-namespace GTParamDBEditor.Core;
+namespace GTDataSQLiteConverter.ParamDb;
 
 /// <summary>
 /// The label hash the game uses as the primary key of every table row.

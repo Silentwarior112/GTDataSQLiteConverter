@@ -1,15 +1,17 @@
 using System.Data;
 using System.Globalization;
 
-using GTDataSQLiteConverter;
 using GTDataSQLiteConverter.Entities;
 
 using Microsoft.Data.Sqlite;
 
-namespace GTParamDBEditor.Core;
+namespace GTDataSQLiteConverter.ParamDb;
 
 public sealed class ParamDbMeta
 {
+    /// <summary>Which game's table order and layouts apply - see <see cref="ParamDbGame"/>.</summary>
+    public string Game { get; set; } = ParamDbGame.Gt3.Id;
+
     public uint AlignMask { get; set; } = 7;
     public bool LastIndexAbsolute { get; set; }
     public string Suffix { get; set; } = "";
@@ -36,13 +38,12 @@ public sealed class ParamDbMeta
 }
 
 /// <summary>
-/// The editable database. A ParamDB is unpacked into a real SQLite file that the grid reads and
-/// writes through; saving turns that SQLite back into game files.
+/// The editable database. A ParamDB is unpacked into a real SQLite file - the editor's grid reads and
+/// writes through it, and the CLI's export is this file - and saving turns it back into game files.
 ///
-/// Per-table schemas match the CLI converter's export exactly, so the file stays usable with
-/// `GTDataSQLiteConverter import`. Everything the editor needs on top of that (the archive's
-/// alignment, the original block bytes, the string tables as loaded) lives in extra `_`-prefixed
-/// tables, which the CLI ignores.
+/// Each table is a plain SQLite table with one column per field, so any SQLite tool can edit it.
+/// Everything needed on top of that (the archive's alignment, the original block bytes, the string
+/// tables as loaded, the column layouts) lives in extra `_`-prefixed tables.
 /// </summary>
 public sealed class LiveDatabase : IDisposable
 {
@@ -53,6 +54,8 @@ public sealed class LiveDatabase : IDisposable
     private const string RawTable = "_RawTableData";
     private const string SeedStringsTable = "_SeedStrings";
     private const string SeedIdTable = "_SeedIdTable";
+    private const string TableLayoutTable = "_TableLayout";
+    private const string ColumnLayoutTable = "_ColumnLayout";
 
     private readonly SqliteConnection _connection;
 
@@ -67,6 +70,8 @@ public sealed class LiveDatabase : IDisposable
     public bool IsTemporary { get; }
     public List<LiveTable> Tables { get; } = new();
     public ParamDbMeta Meta { get; private set; } = new();
+
+    public ParamDbGame Game => ParamDbGame.FromId(Meta.Game);
 
     public SqliteConnection Connection => _connection;
 
@@ -106,6 +111,7 @@ public sealed class LiveDatabase : IDisposable
         {
             Meta = new ParamDbMeta
             {
+                Game = ParamDbGame.Detect(files.Archive).Id,
                 AlignMask = files.Archive.AlignMask,
                 LastIndexAbsolute = files.Archive.LastIndexIsAbsolute,
                 Suffix = files.Paths.Suffix,
@@ -145,15 +151,18 @@ public sealed class LiveDatabase : IDisposable
         return live;
     }
 
-    /// <summary>Reopens a SQLite database produced by this editor (or by the CLI converter).</summary>
-    public static LiveDatabase Open(string sqlitePath, IList<string> warnings)
+    /// <summary>
+    /// Reopens a SQLite database written by <see cref="CreateFrom"/>, or exported by an older version
+    /// of the CLI. A temporary one is deleted when disposed.
+    /// </summary>
+    public static LiveDatabase Open(string sqlitePath, IList<string> warnings, bool isTemporary = false)
     {
         var connection = new SqliteConnection($"Data Source={sqlitePath};Mode=ReadWrite");
         connection.Open();
 
         try
         {
-            var live = new LiveDatabase(connection, sqlitePath, isTemporary: false);
+            var live = new LiveDatabase(connection, sqlitePath, isTemporary);
             live.CreateMetaTables();
             live.ReadMeta();
             live.ReadTables(warnings);
@@ -177,6 +186,10 @@ public sealed class LiveDatabase : IDisposable
                 ElementSize INTEGER, NumOfElements INTEGER, IsMapped INTEGER, Data BLOB);
             CREATE TABLE IF NOT EXISTS {Quote(SeedStringsTable)} (Kind TEXT, Idx INTEGER, Value TEXT, Raw BLOB);
             CREATE TABLE IF NOT EXISTS {Quote(SeedIdTable)} (Hash TEXT PRIMARY KEY, StrIndex INTEGER);
+            CREATE TABLE IF NOT EXISTS {Quote(TableLayoutTable)} (
+                TableName TEXT PRIMARY KEY, MappedRowSize INTEGER, RowSize INTEGER, Edited INTEGER, LayoutFile TEXT);
+            CREATE TABLE IF NOT EXISTS {Quote(ColumnLayoutTable)} (
+                TableName TEXT, Ordinal INTEGER, Name TEXT, Type TEXT, Offset INTEGER, Documentation TEXT);
             """);
     }
 
@@ -186,6 +199,7 @@ public sealed class LiveDatabase : IDisposable
 
         var values = new Dictionary<string, string?>
         {
+            ["Game"] = Meta.Game,
             ["AlignMask"] = Meta.AlignMask.ToString(CultureInfo.InvariantCulture),
             ["LastIndexAbsolute"] = Meta.LastIndexAbsolute ? "1" : "0",
             ["Suffix"] = Meta.Suffix,
@@ -233,6 +247,7 @@ public sealed class LiveDatabase : IDisposable
 
         Meta = new ParamDbMeta
         {
+            Game = ParamDbGame.FromId(values.GetValueOrDefault("Game")).Id,
             AlignMask = values.TryGetValue("AlignMask", out string? a) && uint.TryParse(a, out uint mask) ? mask : 7,
             LastIndexAbsolute = values.GetValueOrDefault("LastIndexAbsolute") == "1",
             Suffix = values.GetValueOrDefault("Suffix") ?? "",
@@ -390,12 +405,13 @@ public sealed class LiveDatabase : IDisposable
     private void ImportBlock(ParamDbFiles files, int fileIndex, IList<string> warnings)
     {
         DataBlock block = files.Archive.Blocks[fileIndex];
-        string name = TableNameFor(block.TableID, fileIndex);
+        string name = Game.TableNameFor(block.TableID, fileIndex);
 
         if (block.TableID != fileIndex)
             warnings.Add($"Block #{fileIndex} reports table id {block.TableID}; using its position for ordering.");
 
-        List<LiveColumn> columns = ReadColumns(name, out int mappedRowSize, warnings);
+        TableLayout? layout = TableLayouts.Choose(Game, name, block.ElementSize, warnings);
+        int mappedRowSize = layout?.RowSize ?? 0;
 
         byte[] data = block.Buffer ?? Array.Empty<byte>();
         int expected = block.NumOfElements * block.ElementSize;
@@ -412,9 +428,13 @@ public sealed class LiveDatabase : IDisposable
             SourceRowCount = block.NumOfElements,
             SourceData = data,
             MappedRowSize = mappedRowSize,
+            RowStride = Math.Max(mappedRowSize, block.ElementSize),
+            LayoutFile = layout is { IsCustom: true } ? layout.FilePath : null,
             RowCount = block.NumOfElements,
         };
-        table.Columns.AddRange(columns);
+
+        if (layout is not null)
+            table.Columns.AddRange(layout.Columns);
 
         Tables.Add(table);
 
@@ -430,67 +450,15 @@ public sealed class LiveDatabase : IDisposable
         if (table.HasSizeMismatch)
         {
             warnings.Add(
-                $"'{name}': the mapping describes {mappedRowSize} bytes per row but the file has " +
-                $"{block.ElementSize}. Unmapped bytes are preserved for rows whose label is unchanged.");
+                $"'{name}': the mapping describes {mappedRowSize} bytes per row but the file has {block.ElementSize}. " +
+                (mappedRowSize > block.ElementSize
+                    ? "Saving widens the rows, and the new bytes start as zero."
+                    : "Unmapped bytes are preserved for rows whose label is unchanged."));
         }
 
         CreateTable(table);
         FillTable(table, files);
-    }
-
-    private static string TableNameFor(short tableId, int fileIndex)
-    {
-        var type = (CarDatabaseFileType)tableId;
-        return Enum.IsDefined(type) ? type.ToString() : $"Table_{fileIndex}";
-    }
-
-    private static List<LiveColumn> ReadColumns(string tableName, out int mappedRowSize, IList<string> warnings)
-    {
-        mappedRowSize = 0;
-
-        string? headersFile = TableMappingReader.GetHeadersFile(tableName);
-        if (headersFile is null)
-            return new List<LiveColumn>();
-
-        List<TableColumn> mappings = TableMappingReader.ReadColumnMappings(headersFile, out int size);
-        mappedRowSize = size;
-
-        List<string?> docs = HeaderDocs.ForTable(tableName);
-
-        var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var columns = new List<LiveColumn>(mappings.Count);
-
-        for (int i = 0; i < mappings.Count; i++)
-        {
-            TableColumn mapping = mappings[i];
-
-            string name = mapping.Name;
-            if (!used.Add(name))
-            {
-                int suffix = 2;
-                while (!used.Add($"{name}_{suffix}"))
-                    suffix++;
-
-                warnings.Add($"'{tableName}' declares '{name}' more than once; the later one is shown as '{name}_{suffix}'.");
-                name = $"{name}_{suffix}";
-            }
-
-            if (mapping.Type == DBColumnType.Unknown)
-            {
-                warnings.Add($"'{tableName}.{name}' has an unknown type in its .headers file and was dropped.");
-                continue;
-            }
-
-            columns.Add(new LiveColumn
-            {
-                Name = name,
-                Type = mapping.Type,
-                Offset = (int)mapping.Offset,
-                Documentation = i < docs.Count ? docs[i] : null,
-            });
-        }
-
-        return columns;
+        WriteLayout(table);
     }
 
     private void InsertInfoRow(LiveTable table)
@@ -588,7 +556,7 @@ public sealed class LiveDatabase : IDisposable
 
         if (rawRows.Count == 0)
         {
-            // A plain CLI export: no raw block data, so only the mapped tables can be reconstructed.
+            // An export from an older CLI: no raw block data, so only the mapped tables can be reconstructed.
             using SqliteCommand command = _connection.CreateCommand();
             command.CommandText = $"SELECT TableName, TableID, Version FROM {Quote(InfoTable)} ORDER BY TableID;";
             using SqliteDataReader reader = command.ExecuteReader();
@@ -600,16 +568,16 @@ public sealed class LiveDatabase : IDisposable
             }
 
             if (rawRows.Count > 0)
-                warnings.Add("This SQLite file was not produced by the editor; bytes not covered by a .headers mapping cannot be preserved.");
+                warnings.Add("This SQLite file is an export from an older version of the CLI, so bytes not covered by a .headers mapping cannot be preserved.");
         }
 
         if (rawRows.Count == 0)
             throw new InvalidDataException("This SQLite file has no ParamDB table information in it.");
 
+        Dictionary<string, StoredLayout> stored = ReadStoredLayouts();
+
         foreach (var raw in rawRows)
         {
-            List<LiveColumn> columns = ReadColumns(raw.Name, out int mappedRowSize, warnings);
-
             var table = new LiveTable
             {
                 Name = raw.Name,
@@ -619,9 +587,28 @@ public sealed class LiveDatabase : IDisposable
                 SourceElementSize = raw.ElementSize,
                 SourceRowCount = raw.Rows,
                 SourceData = raw.Data,
-                MappedRowSize = mappedRowSize,
             };
-            table.Columns.AddRange(columns);
+
+            // The database remembers each table's layout, columns added or removed since included.
+            // Older ones get theirs from the .headers files again.
+            if (stored.TryGetValue(raw.Name, out StoredLayout? layout))
+            {
+                table.Columns.AddRange(layout.Columns);
+                table.MappedRowSize = layout.MappedRowSize;
+                table.RowStride = layout.RowStride;
+                table.LayoutEdited = layout.Edited;
+                table.LayoutFile = layout.LayoutFile;
+            }
+            else
+            {
+                TableLayout? headers = TableLayouts.Choose(Game, raw.Name, raw.ElementSize, warnings);
+                if (headers is not null)
+                    table.Columns.AddRange(headers.Columns);
+
+                table.MappedRowSize = headers?.RowSize ?? 0;
+                table.RowStride = Math.Max(table.MappedRowSize, raw.ElementSize);
+                table.LayoutFile = headers is { IsCustom: true } ? headers.FilePath : null;
+            }
 
             table.RowCount = table.IsMapped && TableExists(table.Name) ? CountRows(table.Name) : raw.Rows;
             Tables.Add(table);
@@ -637,6 +624,273 @@ public sealed class LiveDatabase : IDisposable
         command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = $name;";
         command.Parameters.AddWithValue("$name", name);
         return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) > 0;
+    }
+
+    // ---------------------------------------------------------------- column layout
+
+    private sealed record StoredLayout(List<LiveColumn> Columns, int MappedRowSize, int RowStride, bool Edited, string? LayoutFile);
+
+    private Dictionary<string, StoredLayout> ReadStoredLayouts()
+    {
+        var columns = new Dictionary<string, List<LiveColumn>>(StringComparer.OrdinalIgnoreCase);
+
+        using (SqliteCommand command = _connection.CreateCommand())
+        {
+            command.CommandText = $"SELECT TableName, Name, Type, Offset, Documentation FROM {Quote(ColumnLayoutTable)} ORDER BY TableName, Ordinal;";
+            using SqliteDataReader reader = command.ExecuteReader();
+
+            while (reader.Read())
+            {
+                if (!Enum.TryParse(reader.GetString(2), out DBColumnType type) || type == DBColumnType.Unknown)
+                    continue;
+
+                string table = reader.GetString(0);
+                if (!columns.TryGetValue(table, out List<LiveColumn>? list))
+                    columns[table] = list = new List<LiveColumn>();
+
+                list.Add(new LiveColumn
+                {
+                    Name = reader.GetString(1),
+                    Type = type,
+                    Offset = reader.GetInt32(3),
+                    Documentation = reader.IsDBNull(4) ? null : reader.GetString(4),
+                });
+            }
+        }
+
+        var layouts = new Dictionary<string, StoredLayout>(StringComparer.OrdinalIgnoreCase);
+
+        using (SqliteCommand command = _connection.CreateCommand())
+        {
+            command.CommandText = $"SELECT TableName, MappedRowSize, RowSize, Edited, LayoutFile FROM {Quote(TableLayoutTable)};";
+            using SqliteDataReader reader = command.ExecuteReader();
+
+            while (reader.Read())
+            {
+                string table = reader.GetString(0);
+                layouts[table] = new StoredLayout(
+                    columns.GetValueOrDefault(table) ?? new List<LiveColumn>(),
+                    reader.GetInt32(1),
+                    reader.GetInt32(2),
+                    reader.GetInt64(3) != 0,
+                    reader.IsDBNull(4) ? null : reader.GetString(4));
+            }
+        }
+
+        return layouts;
+    }
+
+    private void WriteLayout(LiveTable table)
+        => WriteLayout(table.Name, table.Columns, table.MappedRowSize, table.RowStride, table.LayoutEdited, table.LayoutFile);
+
+    private void WriteLayout(string tableName, IReadOnlyList<LiveColumn> columns, int mappedRowSize, int rowStride, bool edited, string? layoutFile)
+    {
+        using (SqliteCommand command = _connection.CreateCommand())
+        {
+            command.CommandText = $"""
+                INSERT OR REPLACE INTO {Quote(TableLayoutTable)} (TableName, MappedRowSize, RowSize, Edited, LayoutFile)
+                VALUES ($name, $mapped, $size, $edited, $file);
+                DELETE FROM {Quote(ColumnLayoutTable)} WHERE TableName = $name;
+                """;
+            command.Parameters.AddWithValue("$name", tableName);
+            command.Parameters.AddWithValue("$mapped", mappedRowSize);
+            command.Parameters.AddWithValue("$size", rowStride);
+            command.Parameters.AddWithValue("$edited", edited ? 1 : 0);
+            command.Parameters.AddWithValue("$file", (object?)layoutFile ?? DBNull.Value);
+            command.ExecuteNonQuery();
+        }
+
+        using SqliteCommand insert = _connection.CreateCommand();
+        insert.CommandText = $"""
+            INSERT INTO {Quote(ColumnLayoutTable)} (TableName, Ordinal, Name, Type, Offset, Documentation)
+            VALUES ($table, $ordinal, $name, $type, $offset, $doc);
+            """;
+        insert.Parameters.AddWithValue("$table", tableName);
+        SqliteParameter ordinal = insert.Parameters.Add("$ordinal", SqliteType.Integer);
+        SqliteParameter name = insert.Parameters.Add("$name", SqliteType.Text);
+        SqliteParameter type = insert.Parameters.Add("$type", SqliteType.Text);
+        SqliteParameter offset = insert.Parameters.Add("$offset", SqliteType.Integer);
+        SqliteParameter doc = insert.Parameters.Add("$doc", SqliteType.Text);
+
+        for (int i = 0; i < columns.Count; i++)
+        {
+            ordinal.Value = i;
+            name.Value = columns[i].Name;
+            type.Value = columns[i].Type.ToString();
+            offset.Value = columns[i].Offset;
+            doc.Value = (object?)columns[i].Documentation ?? DBNull.Value;
+            insert.ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>Records that a table's layout is saved - in <paramref name="layoutFile"/>, or null for the game's own.</summary>
+    public void MarkLayoutSaved(LiveTable table, string? layoutFile)
+    {
+        using SqliteCommand command = _connection.CreateCommand();
+        command.CommandText = $"UPDATE {Quote(TableLayoutTable)} SET Edited = 0, LayoutFile = $file WHERE TableName = $name;";
+        command.Parameters.AddWithValue("$file", (object?)layoutFile ?? DBNull.Value);
+        command.Parameters.AddWithValue("$name", table.Name);
+        command.ExecuteNonQuery();
+
+        table.LayoutEdited = false;
+        table.LayoutFile = layoutFile;
+    }
+
+    /// <summary>
+    /// Adds a column to a table. Its values start as whatever the rows already hold at that offset,
+    /// so a column over existing bytes changes nothing by itself. When it does not fit, the rows grow
+    /// and the new bytes start empty.
+    /// </summary>
+    public LiveColumn AddColumn(LiveTable table, string name, DBColumnType type, int offset)
+    {
+        if (!table.CanEditLayout)
+            throw new InvalidOperationException($"Columns cannot be added to {table.Name}.");
+
+        string? problem = table.CheckNewColumn(name, type, offset);
+        if (problem is not null)
+            throw new InvalidOperationException(problem);
+
+        var column = new LiveColumn { Name = name, Type = type, Offset = offset };
+        ChangeLayout(table, table.Columns.Append(column).ToList(), table.RowSizeWith(offset, type));
+        return column;
+    }
+
+    /// <summary>
+    /// Removes a column from a table. When it was the last thing in the rows they shrink; otherwise
+    /// its bytes stay, so the columns after it keep their offsets.
+    /// </summary>
+    public void RemoveColumn(LiveTable table, LiveColumn column)
+    {
+        if (!table.CanEditLayout || !table.CanRemove(column))
+            throw new InvalidOperationException($"{column.Name} cannot be removed from {table.Name}.");
+
+        ChangeLayout(table, table.Columns.Where(c => !ReferenceEquals(c, column)).ToList(), table.RowSizeWithout(column));
+    }
+
+    /// <summary>
+    /// Rebuilds a table's SQLite table for a new layout. Columns the old layout also had keep their
+    /// values, unsaved edits included; new ones are read from the rows' bytes. Physical column order
+    /// follows the row, like everywhere else.
+    /// </summary>
+    private void ChangeLayout(LiveTable table, List<LiveColumn> columns, int rowStride)
+    {
+        columns = columns.OrderBy(c => c.Offset).ToList();
+        List<LiveColumn> kept = columns.Where(c => table.Columns.Any(old => old.IsSameField(c))).ToList();
+        List<LiveColumn> added = columns.Except(kept).ToList();
+
+        string temporary = table.Name + "__layout";
+        string definitions = string.Join(",\n    ", columns.Select(c => $"{Quote(c.Name)} {c.SqliteType}"));
+        string keptList = string.Concat(kept.Select(c => ", " + Quote(c.Name)));
+
+        using (SqliteTransaction transaction = _connection.BeginTransaction())
+        {
+            Execute($"DROP TABLE IF EXISTS {Quote(temporary)};\nCREATE TABLE {Quote(temporary)} (\n    {definitions}\n);");
+            Execute($"INSERT INTO {Quote(temporary)} (rowid{keptList}) SELECT rowid{keptList} FROM {Quote(table.Name)};");
+
+            if (added.Count > 0)
+                FillNewColumns(table, temporary, added);
+
+            Execute($"DROP TABLE {Quote(table.Name)};\nALTER TABLE {Quote(temporary)} RENAME TO {Quote(table.Name)};");
+            WriteLayout(table.Name, columns, rowStride, rowStride, edited: true, table.LayoutFile);
+
+            transaction.Commit();
+        }
+
+        // Only once SQLite has it, so a failure above leaves the table exactly as it was.
+        table.Columns.Clear();
+        table.Columns.AddRange(columns);
+        table.MappedRowSize = rowStride;
+        table.RowStride = rowStride;
+        table.LayoutEdited = true;
+    }
+
+    /// <summary>
+    /// Gives new columns the values their bytes hold in the file, matched by label like the save does.
+    /// Bytes the file never had - past the end of its rows, or in rows added since - start empty.
+    /// </summary>
+    private void FillNewColumns(LiveTable table, string sqliteTable, List<LiveColumn> added)
+    {
+        LiveColumn label = table.PrimaryKeyColumn!;
+        Dictionary<ulong, int> sourceRows = ParamDbWriter.BuildTemplateIndex(table);
+
+        var rows = new List<(long RowId, string? Label)>();
+        using (SqliteCommand select = _connection.CreateCommand())
+        {
+            select.CommandText = $"SELECT rowid, {Quote(label.Name)} FROM {Quote(sqliteTable)};";
+            using SqliteDataReader reader = select.ExecuteReader();
+            while (reader.Read())
+                rows.Add((reader.GetInt64(0), reader.IsDBNull(1) ? null : reader.GetString(1)));
+        }
+
+        using SqliteCommand update = _connection.CreateCommand();
+        update.CommandText =
+            $"UPDATE {Quote(sqliteTable)} SET {string.Join(", ", added.Select((c, i) => $"{Quote(c.Name)} = $p{i}"))} WHERE rowid = $rowid;";
+        SqliteParameter[] values = added.Select((_, i) => AddValueParameter(update, $"$p{i}")).ToArray();
+        SqliteParameter rowId = update.Parameters.Add("$rowid", SqliteType.Integer);
+
+        SeedDecoder? decoder = null;
+        byte[] row = new byte[table.SourceElementSize];
+
+        foreach ((long id, string? text) in rows)
+        {
+            int source = -1;
+            if (text is not null && sourceRows.TryGetValue(GtHash.TryParsePlaceholder(text, out ulong raw) ? raw : GtHash.Hash(text), out int index))
+            {
+                source = index;
+                int start = source * table.SourceElementSize;
+                Array.Clear(row);
+                table.SourceData.AsSpan(start, Math.Min(row.Length, table.SourceData.Length - start)).CopyTo(row);
+            }
+
+            for (int i = 0; i < added.Count; i++)
+            {
+                LiveColumn column = added[i];
+                bool inFile = source >= 0 && column.Offset + column.Size <= table.SourceElementSize;
+
+                values[i].Value = inFile
+                    ? (decoder ??= new SeedDecoder(this)).Read(row, column) ?? DBNull.Value
+                    : EmptyValue(column);
+            }
+
+            rowId.Value = id;
+            update.ExecuteNonQuery();
+        }
+    }
+
+    private static object EmptyValue(LiveColumn column) => column.Type switch
+    {
+        DBColumnType.Id => DBNull.Value,
+        DBColumnType.String or DBColumnType.Unicode => "",
+        DBColumnType.Float or DBColumnType.Double => 0.0,
+        _ => 0L,
+    };
+
+    /// <summary>Reads row bytes against the string and ID tables as the file was loaded with them.</summary>
+    private sealed class SeedDecoder
+    {
+        private readonly StringTable _strings;
+        private readonly StringTable _uniStrings;
+        private readonly StringTable _idStrings;
+        private readonly Dictionary<ulong, long> _ids;
+
+        public SeedDecoder(LiveDatabase database)
+        {
+            (_strings, _uniStrings, _idStrings) = database.ReadSeedStrings();
+            _ids = database.ReadSeedIds().ToDictionary(e => e.Hash, e => e.StrIndex);
+        }
+
+        public object? Read(ReadOnlySpan<byte> row, LiveColumn column)
+            => CellCodec.Read(row, column, ResolveId, _strings, _uniStrings);
+
+        private string? ResolveId(ulong hash)
+        {
+            if (hash == 0)
+                return null;
+
+            return _ids.TryGetValue(hash, out long index) && index >= 0 && index < _idStrings.Strings.Count
+                ? _idStrings.Strings[(int)index]
+                : GtHash.ToPlaceholder(hash);
+        }
     }
 
     // ---------------------------------------------------------------- editing

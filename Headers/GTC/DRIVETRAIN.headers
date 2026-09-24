@@ -1,0 +1,18 @@
+include|BASE_TUNINGPART
+add_column|param4WDMIN|byte
+add_column|param4WDMAX|byte
+add_column|param4WDDF|byte
+add_column|drivetype|byte
+add_column|type4WD|byte
+add_column|enginebrake|ushort
+add_column|iwheelF|ushort
+add_column|iwheelR|ushort
+add_column|ipropF|ushort
+add_column|ipropR|ushort
+add_column|iflywheel|ushort
+
+// GT Concept only - padding in retail GT3
+add_column|Unk0x22|byte
+padding|1
+
+add_column|Price|uint

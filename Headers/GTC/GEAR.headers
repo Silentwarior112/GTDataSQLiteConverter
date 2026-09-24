@@ -1,0 +1,22 @@
+include|BASE_TUNINGPART
+add_column|Nshift|byte
+add_column|GearReverse|ushort
+add_column|Gear1st|ushort
+add_column|Gear2nd|ushort
+add_column|Gear3rd|ushort
+add_column|Gear4th|ushort
+add_column|Gear5th|ushort
+add_column|Gear6th|ushort
+add_column|Gear7th|ushort
+add_column|finalgearDF|ushort
+add_column|finalgearMAX|ushort
+add_column|finalgearMIN|ushort
+add_column|gearflag|byte
+add_column|maxspeedDF|byte
+add_column|maxspeedMIN|byte
+add_column|maxspeedMAX|byte
+add_column|Price|uint
+
+// GT Concept only - not in retail GT3
+add_column|Unk0x30|byte
+padding|7
